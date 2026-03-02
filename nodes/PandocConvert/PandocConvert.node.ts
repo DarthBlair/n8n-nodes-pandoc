@@ -3,7 +3,7 @@ import {
     INodeExecutionData,
     INodeType,
     INodeTypeDescription,
-    IBinaryKeyData,
+    NodeConnectionType,
 } from 'n8n-workflow';
 import pandoc from 'node-pandoc';
 import { promisify } from 'util';
@@ -35,15 +35,15 @@ export class PandocConvert implements INodeType {
         defaults: {
             name: 'Pandoc Convert',
         },
-        inputs: ['main'],
+        inputs: [NodeConnectionType.Main],
         outputs: [
             {
-                type: 'main',
+                type: NodeConnectionType.Main,
                 displayName: 'Converted Document',
                 required: true,
             },
             {
-                type: 'main',
+                type: NodeConnectionType.Main,
                 displayName: 'Extracted Images',
                 required: false,
             },
@@ -208,7 +208,7 @@ export class PandocConvert implements INodeType {
                 await mkdir(mediaDir, { recursive: true });
 
                 // Write input file
-                const buffer = Buffer.from(binaryData.data, 'base64');
+                const buffer = await this.helpers.getBinaryDataBuffer(i, binaryPropertyName);
                 await writeFile(inputPath, buffer);
 
                 // Build pandoc arguments
@@ -227,17 +227,15 @@ export class PandocConvert implements INodeType {
                 const outputContent = await readFile(outputPath);
 
                 // Create the new binary data for the main output
-                const newBinaryData: IBinaryKeyData = {
-                    [binaryPropertyName]: {
-                        data: outputContent.toString('base64'),
-                        mimeType: PandocConvert.getMimeType(toFormat),
-                        fileName: PandocConvert.getFileName(binaryData.fileName || 'document', toFormat),
-                    }
-                };
-
                 returnData.push({
                     json: items[i].json,
-                    binary: newBinaryData,
+                    binary: {
+                        [binaryPropertyName]: await this.helpers.prepareBinaryData(
+                            outputContent,
+                            PandocConvert.getFileName(binaryData.fileName || 'document', toFormat),
+                            PandocConvert.getMimeType(toFormat),
+                        ),
+                    },
                 });
 
                 // Handle extracted images if converting to markdown
@@ -260,11 +258,11 @@ export class PandocConvert implements INodeType {
                                 imageName: deterministicImageName,
                             },
                             binary: {
-                                image: {
-                                    data: fileContent.toString('base64'),
+                                image: await this.helpers.prepareBinaryData(
+                                    fileContent,
+                                    deterministicImageName,
                                     mimeType,
-                                    fileName: deterministicImageName,
-                                }
+                                ),
                             }
                         });
                     }
