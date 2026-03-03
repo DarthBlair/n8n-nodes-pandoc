@@ -3,17 +3,14 @@ import {
     INodeExecutionData,
     INodeType,
     INodeTypeDescription,
-    IBinaryKeyData,
+    NodeConnectionType,
 } from 'n8n-workflow';
-import pandoc from 'node-pandoc';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import { writeFile, readFile, unlink, readdir, mkdir, rmdir } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { v5 as uuidv5 } from 'uuid';
 import mime from 'mime-types';
-
-const pandocAsync = promisify(pandoc);
 
 // Create a namespace UUID for our application (using v4 for the namespace is fine as it's constant)
 const NAMESPACE_UUID = '6ba7b810-9dad-11d1-80b4-00c04fd430c8'; // UUID namespace for URLs (standard namespace)
@@ -22,6 +19,26 @@ interface PandocError extends Error {
     code?: string;
     stdout?: string;
     stderr?: string;
+}
+
+function pandocAsync(inputPath: string, args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const proc = spawn('pandoc', [inputPath, ...args]);
+        let stderr = '';
+        proc.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
+        proc.on('close', (code: number | null) => {
+            if (code !== 0) {
+                const err = new Error(`pandoc exited with code ${code}\n${stderr}`) as PandocError;
+                err.stderr = stderr;
+                reject(err);
+            } else {
+                resolve();
+            }
+        });
+        proc.on('error', (err) => {
+            reject(new Error(`Failed to spawn pandoc: ${err.message}`));
+        });
+    });
 }
 
 export class PandocConvert implements INodeType {
@@ -35,15 +52,15 @@ export class PandocConvert implements INodeType {
         defaults: {
             name: 'Pandoc Convert',
         },
-        inputs: ['main'],
+        inputs: [NodeConnectionType.Main],
         outputs: [
             {
-                type: 'main',
+                type: NodeConnectionType.Main,
                 displayName: 'Converted Document',
                 required: true,
             },
             {
-                type: 'main',
+                type: NodeConnectionType.Main,
                 displayName: 'Extracted Images',
                 required: false,
             },
@@ -208,7 +225,7 @@ export class PandocConvert implements INodeType {
                 await mkdir(mediaDir, { recursive: true });
 
                 // Write input file
-                const buffer = Buffer.from(binaryData.data, 'base64');
+                const buffer = await this.helpers.getBinaryDataBuffer(i, binaryPropertyName);
                 await writeFile(inputPath, buffer);
 
                 // Build pandoc arguments
@@ -227,17 +244,15 @@ export class PandocConvert implements INodeType {
                 const outputContent = await readFile(outputPath);
 
                 // Create the new binary data for the main output
-                const newBinaryData: IBinaryKeyData = {
-                    [binaryPropertyName]: {
-                        data: outputContent.toString('base64'),
-                        mimeType: PandocConvert.getMimeType(toFormat),
-                        fileName: PandocConvert.getFileName(binaryData.fileName || 'document', toFormat),
-                    }
-                };
-
                 returnData.push({
                     json: items[i].json,
-                    binary: newBinaryData,
+                    binary: {
+                        [binaryPropertyName]: await this.helpers.prepareBinaryData(
+                            outputContent,
+                            PandocConvert.getFileName(binaryData.fileName || 'document', toFormat),
+                            PandocConvert.getMimeType(toFormat),
+                        ),
+                    },
                 });
 
                 // Handle extracted images if converting to markdown
@@ -260,11 +275,11 @@ export class PandocConvert implements INodeType {
                                 imageName: deterministicImageName,
                             },
                             binary: {
-                                image: {
-                                    data: fileContent.toString('base64'),
+                                image: await this.helpers.prepareBinaryData(
+                                    fileContent,
+                                    deterministicImageName,
                                     mimeType,
-                                    fileName: deterministicImageName,
-                                }
+                                ),
                             }
                         });
                     }
